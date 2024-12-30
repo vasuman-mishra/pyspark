@@ -1,0 +1,71 @@
+from pyspark.sql import SparkSession
+
+# Initialize Spark Session
+spark = SparkSession.builder.appName("DataCleaning").getOrCreate()
+
+# Load the dataset
+file_path = "/content/emp_data.csv"
+df = spark.read.csv(file_path, header=True, inferSchema=True)
+
+# Show the first few rows and schema
+df.show()
+df.printSchema()
+
+# Verify column loading and check for null/malformed entries
+df.select([col for col in df.columns if df.filter(df[col].isNull()).count() > 0]).show()
+from pyspark.sql.functions import col, isnan, when, count
+
+# Count the number of null or NaN values in each column
+df.select(
+    [count(when(col(c).isNull() | isnan(col(c)), c)).alias(c) for c in df.columns]
+).show()
+#igorefrom pyspark.sql.functions import col
+
+# Check for null values in each column
+missing_values = df.select([(df[c].isNull()).alias(c) for c in df.columns])
+missing_values.show()
+# Replace missing LastName with "Unknown"
+df = df.fillna({"LastName": "Unknown"})
+# Drop rows where EmpID or StartDate is null
+df = df.dropna(subset=["EmpID", "StartDate"])
+# Cap Current Employee Rating values between 1 and 5
+from pyspark.sql.functions import when
+
+# Use the correct column name 'Current Employee Rating'
+df = df.withColumn("Current Employee Rating",
+                   when(df["Current Employee Rating"] < 1, 1)
+                   .when(df["Current Employee Rating"] > 5, 5)
+                   .otherwise(df["Current Employee Rating"]))
+# Inspect LocationCode for invalid entries
+df.select("LocationCode").distinct().show()
+# Count employees by department and designation
+department_count = df.groupBy("DepartmentType", "JobFunctionDescription").count()
+department_count.show()
+from pyspark.sql.functions import when, col, max
+
+# Map categorical performance scores to numeric values
+df = df.withColumn(
+    "PerformanceScoreNumeric",
+    when(col("Performance Score") == "Exceeds", 4)
+    .when(col("Performance Score") == "Fully Meets", 3)
+    .when(col("Performance Score") == "Needs Improvement", 2)
+    .when(col("Performance Score") == "PIP", 1)
+)
+
+# Step 1: Find the maximum performance score for each department
+max_scores = df.groupBy("DepartmentType").agg(
+    max("PerformanceScoreNumeric").alias("MaxPerformanceScoreNumeric")
+)
+
+# Step 2: Filter employees matching the maximum score for their department
+# Use aliases to specify the source DataFrame for each column
+result = df.alias("df").join(
+    max_scores.alias("max_scores"),
+    (df["DepartmentType"] == max_scores["DepartmentType"]) &
+    (df["PerformanceScoreNumeric"] == max_scores["MaxPerformanceScoreNumeric"])
+).select("df.DepartmentType", "df.EmpID", "df.Performance Score") # Explicitly select from aliased DataFrame
+
+
+# Show the result
+result.show(100)
+df.coalesce(1).write.csv("/content/cleaned datasets",header=True,mode="overwrite")
